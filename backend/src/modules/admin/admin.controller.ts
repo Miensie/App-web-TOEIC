@@ -1,10 +1,13 @@
-import Anthropic from '@anthropic-ai/sdk';
-import pdfParse from 'pdf-parse';
-import { Response } from 'express';
+import { Request, Response } from 'express';
 import { z } from 'zod';
 import { supabase } from '../../shared/utils/supabase';
 import { sendSuccess, sendError } from '../../shared/utils/apiResponse';
 import { AuthenticatedRequest } from '../../shared/middleware/authMiddleware';
+import Anthropic from '@anthropic-ai/sdk';
+
+// Import pdf-parse avec la syntaxe correcte pour CommonJS
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const pdfParse = require('pdf-parse');
 
 const optionSchema = z.object({
   label: z.string(),
@@ -221,12 +224,13 @@ export async function updateQuestion(req: AuthenticatedRequest, res: Response): 
   } catch { sendError(res, 'Erreur serveur', 500); }
 }
 
-export async function importFromPdfs(req: AuthenticatedRequest, res: Response): Promise<void> {
+export async function importFromPdfs(req: Request, res: Response): Promise<void> {
   try {
-    const files = req.files as { [fieldname: string]: Express.Multer.File[] };
-    const title = (req.body.title as string) || 'TOEIC Test';
+    // Multer attache les fichiers sur req.files
+    const files = req.files as { [fieldname: string]: { buffer: Buffer; originalname: string }[] };
+    const title = (req.body?.title as string) || 'TOEIC Test';
 
-    if (!files.listening || !files.reading || !files.answers) {
+    if (!files?.listening || !files?.reading || !files?.answers) {
       sendError(res, 'Les 3 PDFs sont requis (listening, reading, answers)', 400);
       return;
     }
@@ -238,21 +242,21 @@ export async function importFromPdfs(req: AuthenticatedRequest, res: Response): 
       pdfParse(files.answers[0].buffer),
     ]);
 
-    const listeningText = listeningPdf.text;
-    const readingText = readingPdf.text;
-    const answersText = answersPdf.text;
+    const listeningText: string = listeningPdf.text;
+    const readingText: string = readingPdf.text;
+    const answersText: string = answersPdf.text;
 
     // ── Étape 2 : Appeler Claude pour structurer les données ──
     const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
-    // D'abord extraire les réponses correctes
+    // Extraire les réponses correctes
     const answersResponse = await anthropic.messages.create({
       model: 'claude-opus-4-6',
       max_tokens: 4096,
       messages: [{
         role: 'user',
         content: `Tu es un expert TOEIC. Voici le corrigé d'un test TOEIC.
-        
+
 Extrait la liste des réponses correctes pour les questions 1 à 200.
 Retourne UNIQUEMENT un objet JSON valide sans markdown, de cette forme exacte :
 {"answers": {"1": "B", "2": "C", "3": "A", ...jusqu'à "200": "X"}}
@@ -264,12 +268,12 @@ ${answersText.substring(0, 8000)}`,
 
     let correctAnswers: Record<string, string> = {};
     try {
-      const answersContent = answersResponse.content[0].type === 'text' ? answersResponse.content[0].text : '';
+      const answersContent = answersResponse.content[0].type === 'text'
+        ? answersResponse.content[0].text : '';
       const cleanedAnswers = answersContent.replace(/```json|```/g, '').trim();
-      const parsed = JSON.parse(cleanedAnswers);
-      correctAnswers = parsed.answers || {};
+      correctAnswers = JSON.parse(cleanedAnswers).answers || {};
     } catch {
-      sendError(res, 'Erreur lors de l\'analyse du corrigé', 500);
+      sendError(res, "Erreur lors de l'analyse du corrigé", 500);
       return;
     }
 
@@ -279,10 +283,10 @@ ${answersText.substring(0, 8000)}`,
       max_tokens: 8192,
       messages: [{
         role: 'user',
-        content: `Tu es un expert TOEIC. Voici le livret Listening d'un test TOEIC (Parts 1 à 4, questions 1 à 100).
+        content: `Tu es un expert TOEIC. Voici le livret Listening (Parts 1-4, questions 1-100).
 
 Extrait toutes les questions avec leurs options A, B, C, D.
-Pour la Part 2, les options sont A, B, C seulement.
+Pour la Part 2, seulement A, B, C.
 Retourne UNIQUEMENT un JSON valide sans markdown :
 
 {
@@ -291,7 +295,7 @@ Retourne UNIQUEMENT un JSON valide sans markdown :
       "number": 1,
       "section": "LISTENING",
       "title": "Photographs",
-      "description": "...",
+      "description": "For each question, you will hear four statements about a picture.",
       "questions": [
         {
           "globalIndex": 1,
@@ -299,10 +303,10 @@ Retourne UNIQUEMENT un JSON valide sans markdown :
           "type": "PHOTO_DESCRIPTION",
           "stimulus": null,
           "options": [
-            {"label": "A", "content": "...", "isCorrect": false},
-            {"label": "B", "content": "...", "isCorrect": false},
-            {"label": "C", "content": "...", "isCorrect": false},
-            {"label": "D", "content": "...", "isCorrect": false}
+            {"label": "A", "content": "Statement A", "isCorrect": false},
+            {"label": "B", "content": "Statement B", "isCorrect": true},
+            {"label": "C", "content": "Statement C", "isCorrect": false},
+            {"label": "D", "content": "Statement D", "isCorrect": false}
           ]
         }
       ]
@@ -310,13 +314,11 @@ Retourne UNIQUEMENT un JSON valide sans markdown :
   ]
 }
 
-IMPORTANT : Pour chaque question, marque isCorrect: true pour la bonne réponse selon ce dictionnaire :
-${JSON.stringify(correctAnswers)}
+Marque isCorrect: true selon ce dictionnaire : ${JSON.stringify(correctAnswers)}
+Pour la Part 1, mets des options génériques ("Statement A", etc.) car les réponses sont audio.
+Pour Parts 3 et 4, inclus le texte des conversations dans stimulus.
 
-Pour la Part 1, les réponses (A, B, C, D) ne sont pas dans le livret — elles sont seulement audio. Mets des options génériques : "Statement A", "Statement B", etc.
-Pour les Parts 3 et 4, inclus le texte des conversations/monologues dans stimulus.
-
-Texte du livret Listening :
+Texte Listening :
 ${listeningText.substring(0, 12000)}`,
       }],
     });
@@ -327,7 +329,7 @@ ${listeningText.substring(0, 12000)}`,
       max_tokens: 8192,
       messages: [{
         role: 'user',
-        content: `Tu es un expert TOEIC. Voici le livret Reading d'un test TOEIC (Parts 5 à 7, questions 101 à 200).
+        content: `Tu es un expert TOEIC. Voici le livret Reading (Parts 5-7, questions 101-200).
 
 Extrait toutes les questions avec leurs options A, B, C, D.
 Retourne UNIQUEMENT un JSON valide sans markdown :
@@ -338,13 +340,13 @@ Retourne UNIQUEMENT un JSON valide sans markdown :
       "number": 5,
       "section": "READING",
       "title": "Incomplete Sentences",
-      "description": "...",
+      "description": "A word or phrase is missing. Select the best answer.",
       "questions": [
         {
           "globalIndex": 101,
           "orderIndex": 1,
           "type": "INCOMPLETE_SENTENCE",
-          "stimulus": "Ms. Durkin asked for volunteers to help ------- with the employee fitness program.",
+          "stimulus": "Ms. Durkin asked for volunteers to help ------- with the fitness program.",
           "options": [
             {"label": "A", "content": "she", "isCorrect": false},
             {"label": "B", "content": "her", "isCorrect": false},
@@ -357,12 +359,10 @@ Retourne UNIQUEMENT un JSON valide sans markdown :
   ]
 }
 
-IMPORTANT : Marque isCorrect: true selon ce dictionnaire de réponses correctes :
-${JSON.stringify(correctAnswers)}
+Marque isCorrect: true selon : ${JSON.stringify(correctAnswers)}
+Pour la Part 7, inclus le texte complet du passage dans stimulus.
 
-Pour la Part 7, inclus le texte complet du passage dans le stimulus de chaque groupe de questions.
-
-Texte du livret Reading :
+Texte Reading :
 ${readingText.substring(0, 15000)}`,
       }],
     });
@@ -372,26 +372,26 @@ ${readingText.substring(0, 15000)}`,
     let readingParts: any[] = [];
 
     try {
-      const lContent = listeningResponse.content[0].type === 'text' ? listeningResponse.content[0].text : '';
-      const lCleaned = lContent.replace(/```json|```/g, '').trim();
-      listeningParts = JSON.parse(lCleaned).parts || [];
+      const lContent = listeningResponse.content[0].type === 'text'
+        ? listeningResponse.content[0].text : '';
+      listeningParts = JSON.parse(lContent.replace(/```json|```/g, '').trim()).parts || [];
     } catch {
-      sendError(res, 'Erreur lors de l\'analyse du Listening', 500);
+      sendError(res, "Erreur lors de l'analyse du Listening", 500);
       return;
     }
 
     try {
-      const rContent = readingResponse.content[0].type === 'text' ? readingResponse.content[0].text : '';
-      const rCleaned = rContent.replace(/```json|```/g, '').trim();
-      readingParts = JSON.parse(rCleaned).parts || [];
+      const rContent = readingResponse.content[0].type === 'text'
+        ? readingResponse.content[0].text : '';
+      readingParts = JSON.parse(rContent.replace(/```json|```/g, '').trim()).parts || [];
     } catch {
-      sendError(res, 'Erreur lors de l\'analyse du Reading', 500);
+      sendError(res, "Erreur lors de l'analyse du Reading", 500);
       return;
     }
 
     const allParts = [...listeningParts, ...readingParts];
 
-    // ── Étape 4 : Insérer en base de données ──
+    // ── Étape 4 : Insérer en base ──
     const { data: test, error: testError } = await supabase
       .from('tests')
       .insert({ title, version: '1.0' })
@@ -424,7 +424,7 @@ ${readingText.substring(0, 15000)}`,
       if (partError || !partData) continue;
 
       for (const q of (part.questions || [])) {
-        const { data: questionData, error: questionError } = await supabase
+        const { data: questionData, error: qError } = await supabase
           .from('questions')
           .insert({
             partId: partData.id,
@@ -436,7 +436,7 @@ ${readingText.substring(0, 15000)}`,
           .select()
           .single();
 
-        if (questionError || !questionData) continue;
+        if (qError || !questionData) continue;
 
         if (q.options?.length) {
           await supabase.from('options').insert(
@@ -458,10 +458,10 @@ ${readingText.substring(0, 15000)}`,
       title: test.title,
       questionsInserted: totalInserted,
       partsInserted: allParts.length,
-    }, `Test importé avec succès — ${totalInserted} questions sur ${allParts.length} parties`);
+    }, `Test importé — ${totalInserted} questions sur ${allParts.length} parties`);
 
   } catch (err) {
     console.error('Import PDF error:', err);
-    sendError(res, 'Erreur lors de l\'import PDF', 500);
+    sendError(res, "Erreur lors de l'import PDF", 500);
   }
 }
