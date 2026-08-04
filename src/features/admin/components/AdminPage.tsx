@@ -213,6 +213,32 @@ async function handlePdfImport() {
   }
 }
 
+  // Créer un test vide et l'ouvrir pour édition
+  async function createTest() {
+    if (!newTestTitle.trim()) return;
+    setIsCreating(true);
+    try {
+      const payload = { title: newTestTitle.trim(), version: newTestVersion };
+      const data = await apiFetch('/api/admin/tests', {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      });
+
+      if (data.success && data.data?.id) {
+        setNewTestTitle('');
+        // recharger la liste et ouvrir le test créé
+        await loadDrafts();
+        openTest(data.data.id);
+      } else {
+        alert(data.error || 'Erreur lors de la création du test');
+      }
+    } catch (err) {
+      alert('Erreur réseau lors de la création du test');
+    } finally {
+      setIsCreating(false);
+    }
+  }
+
   // ── Ouvrir un test existant pour l'éditer ──
   async function openTest(id: string) {
     const data = await apiFetch(`/api/admin/tests/${id}/full`);
